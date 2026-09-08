@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import html
+import json
 import os
 from pathlib import Path
 
@@ -408,6 +409,7 @@ def _apply_page_visual_refinement() -> None:
             color: #eaf2ff !important;
             font-weight: 600;
         }
+        .st-key-bairro_treemap_card,
         .st-key-perfil_bar_card {
             background: linear-gradient(
                 145deg,
@@ -420,8 +422,9 @@ def _apply_page_visual_refinement() -> None:
             box-shadow: 0 18px 40px rgba(2, 9, 24, 0.42);
             backdrop-filter: blur(6px);
             -webkit-backdrop-filter: blur(6px);
-            min-height: 500px;
+            min-height: 575px;
         }
+        .st-key-bairro_treemap_card [data-testid="stPlotlyChart"],
         .st-key-perfil_bar_card [data-testid="stPlotlyChart"] {
             background: transparent !important;
             border: 0 !important;
@@ -539,6 +542,85 @@ def _hf_fs(token: str | None) -> HfFileSystem:
     return HfFileSystem(token=token or None)
 
 
+@st.cache_data(show_spinner=False)
+def _load_geo_reference(geo_dir: str):
+    base = Path(geo_dir)
+    geojson_path = base / "geojs-31-mun.json"
+    tse_path = base / "municipios_brasileiros_tse.csv"
+    municipios_path = base / "municipios.csv"
+    municipios_regioes_path = base / "municipios.json"
+
+    if not geojson_path.exists() or not tse_path.exists() or not municipios_path.exists():
+        return None, None, None, None
+
+    geojson_mg = json.loads(geojson_path.read_text(encoding="utf-8"))
+    df_tse = pd.read_csv(
+        tse_path,
+        usecols=["codigo_tse", "uf", "nome_municipio", "codigo_ibge"],
+    )
+    df_tse = df_tse[df_tse["uf"].astype(str).str.upper() == "MG"].copy()
+    df_tse["codigo_tse"] = pd.to_numeric(df_tse["codigo_tse"], errors="coerce").astype("Int64")
+    df_tse["codigo_ibge"] = pd.to_numeric(df_tse["codigo_ibge"], errors="coerce").astype("Int64")
+
+    df_municipios = pd.read_csv(
+        municipios_path,
+        usecols=["codigo_ibge", "nome", "latitude", "longitude"],
+    )
+    df_municipios["codigo_ibge"] = pd.to_numeric(
+        df_municipios["codigo_ibge"], errors="coerce"
+    ).astype("Int64")
+
+    if municipios_regioes_path.exists():
+        raw_regioes = json.loads(municipios_regioes_path.read_text(encoding="utf-8"))
+        df_regioes = pd.DataFrame(raw_regioes)
+        expected = {
+            "municipio-id",
+            "municipio-nome",
+            "mesorregiao-nome",
+            "regiao-imediata-nome",
+        }
+        if expected.issubset(df_regioes.columns):
+            df_regioes = df_regioes[
+                [
+                    "municipio-id",
+                    "municipio-nome",
+                    "mesorregiao-nome",
+                    "regiao-imediata-nome",
+                ]
+            ].copy()
+            df_regioes = df_regioes.rename(
+                columns={
+                    "municipio-id": "codigo_ibge",
+                    "municipio-nome": "municipio_ibge_nome",
+                    "mesorregiao-nome": "mesorregiao_nome",
+                    "regiao-imediata-nome": "regiao_imediata_nome",
+                }
+            )
+            df_regioes["codigo_ibge"] = pd.to_numeric(
+                df_regioes["codigo_ibge"], errors="coerce"
+            ).astype("Int64")
+        else:
+            df_regioes = pd.DataFrame(
+                columns=[
+                    "codigo_ibge",
+                    "municipio_ibge_nome",
+                    "mesorregiao_nome",
+                    "regiao_imediata_nome",
+                ]
+            )
+    else:
+        df_regioes = pd.DataFrame(
+            columns=[
+                "codigo_ibge",
+                "municipio_ibge_nome",
+                "mesorregiao_nome",
+                "regiao_imediata_nome",
+            ]
+        )
+
+    return geojson_mg, df_tse, df_municipios, df_regioes
+
+
 @st.cache_data(show_spinner="Carregando dados geograficos...", ttl=1800)
 def load_geographic_votes(bucket_url: str, token: str | None) -> pd.DataFrame:
     if not bucket_url:
@@ -550,6 +632,7 @@ def load_geographic_votes(bucket_url: str, token: str | None) -> pd.DataFrame:
         df = pd.read_parquet(parquet_file)
 
     rename_map = {
+        "cd_ibge_municipio": "codigo_ibge",
         "cd_municipio": "CD_MUNICIPIO",
         "nm_municipio": "municipio",
         "nm_bairro": "bairro",
@@ -560,12 +643,13 @@ def load_geographic_votes(bucket_url: str, token: str | None) -> pd.DataFrame:
     }
     df = df.rename(columns=rename_map).copy()
 
-    required = {"CD_MUNICIPIO", "municipio", "latitude", "longitude", "votos"}
+    required = {"CD_MUNICIPIO", "codigo_ibge", "municipio", "latitude", "longitude", "votos"}
     missing = sorted(required.difference(df.columns))
     if missing:
         raise RuntimeError(f"Colunas ausentes no parquet geografico: {', '.join(missing)}")
 
     df["CD_MUNICIPIO"] = df["CD_MUNICIPIO"].fillna("").astype(str).str.strip()
+    df["codigo_ibge"] = pd.to_numeric(df["codigo_ibge"], errors="coerce").astype("Int64")
     df["municipio"] = df["municipio"].fillna("").astype(str).str.strip()
     df["bairro"] = (
         df["bairro"].fillna("Nao informado").astype(str).str.strip()
@@ -670,7 +754,7 @@ def render_candidate_header(photo_bytes: bytes | None) -> None:
 
 def build_municipio_view(df: pd.DataFrame) -> pd.DataFrame:
     grouped = (
-        df.groupby(["CD_MUNICIPIO", "municipio"], as_index=False)
+        df.groupby(["CD_MUNICIPIO", "codigo_ibge", "municipio"], as_index=False)
         .agg(
             votos=("votos", "sum"),
             latitude=("latitude", "mean"),
@@ -688,30 +772,82 @@ def build_municipio_view(df: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
-def build_vote_map(mapa_df: pd.DataFrame):
+def build_vote_map(
+    municipio_df: pd.DataFrame,
+    geojson_mg: dict,
+    df_municipios_ref: pd.DataFrame,
+    df_regioes_ref: pd.DataFrame,
+):
+    mapa_df = municipio_df.copy()
+    mapa_df["codigo_ibge"] = pd.to_numeric(
+        mapa_df["codigo_ibge"], errors="coerce"
+    ).astype("Int64")
+    mapa_df["codigo_ibge_str"] = mapa_df["codigo_ibge"].astype(str).str.zfill(7)
+
+    geo_ids = []
+    for feature in geojson_mg.get("features", []):
+        props = feature.get("properties", {})
+        geo_id = str(props.get("id", "")).strip()
+        if geo_id:
+            geo_ids.append(geo_id.zfill(7))
+
+    malha_df = pd.DataFrame({"codigo_ibge_str": sorted(set(geo_ids))})
+    malha_df["codigo_ibge"] = pd.to_numeric(
+        malha_df["codigo_ibge_str"], errors="coerce"
+    ).astype("Int64")
+
+    mapa_df = malha_df.merge(
+        mapa_df[
+            [
+                "codigo_ibge_str",
+                "CD_MUNICIPIO",
+                "municipio",
+                "votos",
+            ]
+        ],
+        on="codigo_ibge_str",
+        how="left",
+    )
+    mapa_df = mapa_df.merge(df_municipios_ref, on="codigo_ibge", how="left")
+    mapa_df = mapa_df.merge(
+        df_regioes_ref[["codigo_ibge", "regiao_imediata_nome", "mesorregiao_nome"]],
+        on="codigo_ibge",
+        how="left",
+    )
+
+    mapa_df["votos"] = mapa_df["votos"].fillna(0.0).astype(float)
+    mapa_df["votos_color"] = np.where(
+        mapa_df["votos"] > 0,
+        np.log10(mapa_df["votos"] + 1.0),
+        0.0,
+    )
+    mapa_df["CD_MUNICIPIO"] = mapa_df["CD_MUNICIPIO"].fillna(0).astype(int)
+    mapa_df["municipio_exibicao"] = (
+        mapa_df["nome"]
+        .fillna(mapa_df["municipio"])
+        .fillna("Municipio sem voto")
+    )
     max_votes = float(mapa_df["votos"].max()) if not mapa_df.empty else 0.0
     zmax = float(np.log10(max_votes + 1.0)) if max_votes > 0 else 1.0
     colorbar_tickvals, colorbar_ticktext = _build_log_colorbar_ticks(max_votes)
-    center_lat = float(mapa_df["latitude"].mean()) if not mapa_df.empty else -18.5
-    center_lon = float(mapa_df["longitude"].mean()) if not mapa_df.empty else -44.5
 
-    fig_mg = px.scatter_map(
+    fig_mg = px.choropleth(
         mapa_df,
-        lat="latitude",
-        lon="longitude",
-        size="votos",
+        geojson=geojson_mg,
+        locations="codigo_ibge_str",
+        featureidkey="properties.id",
         color="votos_color",
-        hover_name="municipio",
+        hover_name="municipio_exibicao",
         hover_data={
             "votos_color": False,
             "CD_MUNICIPIO": True,
             "mesorregiao_nome": True,
-            "bairros": True,
+            "regiao_imediata_nome": True,
             "latitude": ":.4f",
             "longitude": ":.4f",
-            "votos": ":,.0f",
+            "codigo_ibge_str": False,
         },
-        custom_data=["CD_MUNICIPIO", "mesorregiao_nome", "latitude", "longitude", "votos"],
+        custom_data=["CD_MUNICIPIO", "latitude", "longitude", "votos"],
         color_continuous_scale=[
             [0.00, "#FFFFFF"],
             [0.000001, "#E8F1FF"],
@@ -720,25 +856,18 @@ def build_vote_map(mapa_df: pd.DataFrame):
             [0.70, "#2563EB"],
             [1.00, "#0B1F4D"],
         ],
-        range_color=[0.0, zmax],
-        size_max=46,
-        zoom=5.45,
-        center={"lat": center_lat, "lon": center_lon},
-        map_style="carto-darkmatter",
-        title="Concentracao de votos por municipio (MG)",
+        title="Concentração de votos por município (MG)",
         template="plotly_white",
+        range_color=[0.0, zmax],
     )
     fig_mg.update_traces(
-        marker={
-            "opacity": 0.84,
-            "sizemin": 4,
-        },
+        marker_line_color="rgba(210,228,255,0.75)",
+        marker_line_width=0.7,
         hovertemplate=(
             "<b>%{hovertext}</b><br>"
-            "<span style='color:#93c5fd'>Votos:</span> %{customdata[4]:,.0f}<br>"
-            "<span style='color:#93c5fd'>Cod. municipio (TSE):</span> %{customdata[0]}<br>"
-            "<span style='color:#93c5fd'>Regiao:</span> %{customdata[1]}<br>"
-            "<span style='color:#93c5fd'>Lat/Lon:</span> %{customdata[2]:.4f}, %{customdata[3]:.4f}<extra></extra>"
+            "<span style='color:#93c5fd'>Votos:</span> %{customdata[3]:,.0f}<br>"
+            "<span style='color:#93c5fd'>Cód. município (TSE):</span> %{customdata[0]}<br>"
+            "<span style='color:#93c5fd'>Lat/Lon:</span> %{customdata[1]:.4f}, %{customdata[2]:.4f}<extra></extra>"
         ),
         hoverlabel={
             "bgcolor": "rgba(5,12,28,0.95)",
@@ -746,6 +875,11 @@ def build_vote_map(mapa_df: pd.DataFrame):
             "font_size": 12,
             "bordercolor": "rgba(147,197,253,0.55)",
         },
+    )
+    fig_mg.update_geos(
+        fitbounds="locations",
+        visible=False,
+        bgcolor="rgba(0,0,0,0)",
     )
     fig_mg.update_layout(
         margin={"l": 6, "r": 36, "t": 52, "b": 6},
@@ -765,10 +899,6 @@ def build_vote_map(mapa_df: pd.DataFrame):
         plot_bgcolor="rgba(255,255,255,0.0)",
         font={"color": "#eaf2ff", "family": "Segoe UI, Inter, sans-serif"},
         title={"font": {"size": 20, "color": "#eaf2ff"}},
-        map={
-            "bearing": 0,
-            "pitch": 0,
-        },
     )
     return fig_mg
 
@@ -1116,10 +1246,19 @@ _section_header_tight(
     "Concentracao territorial dos votos por municipio em MG.",
 )
 
-fig_mg = build_vote_map(municipio_source)
+geo_dir = Path(__file__).resolve().parents[1] / "geo-mg"
+geojson_mg, _df_tse_ref, df_municipios_ref, df_regioes_ref = _load_geo_reference(str(geo_dir))
+if geojson_mg is None or df_municipios_ref is None or df_regioes_ref is None:
+    st.warning(
+        "Arquivos geograficos nao encontrados em geo-mg. Mantenha: geojs-31-mun.json, "
+        "municipios_brasileiros_tse.csv, municipios.csv e municipios.json."
+    )
+    st.stop()
+
+fig_mg = build_vote_map(municipio_source, geojson_mg, df_municipios_ref, df_regioes_ref)
 st.plotly_chart(fig_mg, width="stretch")
 
-_section_header("Votação por Município, Bairro e Zona Eleitoral", "")
+_section_header("Votação por Município, Bairro e Perfil demográfico", "")
 
 regioes_options = (
     df_geo.groupby("mesorregiao_nome", as_index=False)["votos"]
@@ -1147,13 +1286,14 @@ else:
 
     col_left, col_right = st.columns(2, gap="large")
     with col_left:
-        tree_event = st.plotly_chart(
-            fig_tree_bairro,
-            width="stretch",
-            key="bairro_treemap",
-            on_select="rerun",
-            selection_mode="points",
-        )
+        with st.container(key="bairro_treemap_card"):
+            tree_event = st.plotly_chart(
+                fig_tree_bairro,
+                width="stretch",
+                key="bairro_treemap",
+                on_select="rerun",
+                selection_mode="points",
+            )
     with col_right:
         with st.container(key="perfil_bar_card"):
             profile_selected = st.selectbox(

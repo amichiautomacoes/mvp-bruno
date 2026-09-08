@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY background ./background
+COPY geo-mg ./geo-mg
 COPY pages ./pages
 
 EXPOSE 8505
