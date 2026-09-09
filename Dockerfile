@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY background ./background
 COPY geo-mg ./geo-mg
+COPY app.py .
 COPY pages ./pages
 
 EXPOSE 8505
@@ -25,4 +26,4 @@ EXPOSE 8505
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -f http://localhost:8505/_stcore/health || exit 1
 
-CMD ["streamlit", "run", "pages/raiox2022.py", "--server.port=8505", "--server.address=0.0.0.0"]
+CMD ["streamlit", "run", "app.py", "--server.port=8505", "--server.address=0.0.0.0"]
