@@ -1,16 +1,47 @@
 from __future__ import annotations
 
 import base64
+import html
+import json
+import os
+import sqlite3
+import struct
+import tempfile
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
+from dotenv import load_dotenv
+from huggingface_hub import HfFileSystem
 
 
 st.set_page_config(page_title="Potencial de Votos para 2026", layout="wide")
 
+CANDIDATE_FOLDER = "bruno-raiox22"
+OPPORTUNITY_PARQUET = (
+    "2022_deputado_estadual_MG_130001598582_bruno_araujo_oportunidade_setor.parquet"
+)
+CENSUS_GPKG_FILENAME = "MG_setores_CD2022.gpkg"
 NAVIGATION_PAGES = {
     "Pagina 1 - RaioX Votacao 2022": "pages/raiox2022.py",
     "Pagina 2 - Potencial de Votos 2026": "pages/potencial26.py",
+}
+CLASS_ORDER = [
+    "Alta concentracao de votos e perfil parecido",
+    "Concentracao media de votos e perfil parecido",
+    "Pouco voto, mas perfil parecido",
+    "Sem concentracao de votos e perfil diferente",
+    "Fora do perfil do Bruno",
+]
+CLASS_COLORS = {
+    "Alta concentracao de votos e perfil parecido": "#2563EB",
+    "Concentracao media de votos e perfil parecido": "#FACC15",
+    "Pouco voto, mas perfil parecido": "#22C55E",
+    "Sem concentracao de votos e perfil diferente": "#EF4444",
+    "Fora do perfil do Bruno": "#FFFFFF",
 }
 
 
@@ -65,6 +96,14 @@ def apply_background() -> None:
             padding-right: 2.2rem !important;
             padding-bottom: 2rem !important;
         }}
+        @media (min-width: 1200px) {{
+            [data-testid="stAppViewContainer"] > .main .block-container {{
+                max-width: 1580px !important;
+                padding-left: 2.8rem !important;
+                padding-right: 2.8rem !important;
+                padding-bottom: 2.5rem !important;
+            }}
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -106,7 +145,137 @@ def _apply_page_visual_refinement() -> None:
             margin-bottom: 0.15rem;
             line-height: 1.02;
         }
+        .stApp [data-testid="stCaptionContainer"] p {
+            color: #b7c7e6 !important;
+            font-size: 0.95rem !important;
+            margin-bottom: 1.1rem !important;
+            line-height: 1.35 !important;
+        }
+        .mapa-major-section {
+            position: relative;
+            overflow: hidden;
+            padding: 1.08rem 1.2rem 1.02rem 1.2rem;
+            margin: 1.45rem 0 0.82rem 0;
+            border-radius: 20px;
+            border: 1px solid rgba(191, 219, 254, 0.28);
+            background:
+                linear-gradient(
+                    132deg,
+                    rgba(12, 29, 56, 0.88) 0%,
+                    rgba(9, 22, 43, 0.74) 54%,
+                    rgba(8, 20, 40, 0.56) 100%
+                );
+            box-shadow:
+                inset 0 1px 0 rgba(255, 255, 255, 0.03),
+                0 22px 48px rgba(2, 9, 24, 0.46);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+        }
+        .mapa-major-section::before {
+            content: "";
+            position: absolute;
+            inset: 0 auto 0 0;
+            width: 6px;
+            background: linear-gradient(
+                180deg,
+                rgba(191, 219, 254, 0.98) 0%,
+                rgba(59, 130, 246, 0.92) 40%,
+                rgba(11, 31, 77, 0.94) 100%
+            );
+            box-shadow: 0 0 26px rgba(96, 165, 250, 0.36);
+        }
+        .mapa-major-section-title {
+            position: relative;
+            z-index: 1;
+            color: #f8fbff;
+            font-size: 2.06rem;
+            font-weight: 820;
+            line-height: 1.04;
+            letter-spacing: 0.01em;
+            padding-top: 0.18rem;
+        }
+        .mapa-major-section-subtitle {
+            position: relative;
+            z-index: 1;
+            max-width: 62rem;
+            margin-top: 0.36rem;
+            color: #d1def7;
+            font-size: 0.96rem;
+            line-height: 1.45;
+        }
+        .mapa-kpi-card {
+            min-height: 8.4rem;
+            padding: 1rem 1.05rem;
+            border: 1px solid rgba(184, 208, 255, 0.24);
+            border-radius: 18px;
+            background: linear-gradient(
+                145deg,
+                rgba(7, 18, 36, 0.70) 0%,
+                rgba(7, 18, 36, 0.52) 100%
+            );
+            box-shadow: 0 18px 40px rgba(2, 9, 24, 0.42);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+        }
+        .mapa-kpi-label {
+            color: #9eb6da;
+            font-size: 0.78rem;
+            font-weight: 760;
+            letter-spacing: 0.08em;
+            line-height: 1.2;
+            text-transform: uppercase;
+        }
+        .mapa-kpi-value {
+            color: #f8fbff;
+            font-size: 2rem;
+            font-weight: 830;
+            line-height: 1.05;
+            margin-top: 0.48rem;
+        }
+        .mapa-kpi-caption {
+            color: #c7d6ee;
+            font-size: 0.9rem;
+            line-height: 1.32;
+            margin-top: 0.44rem;
+        }
+        [data-testid="stPlotlyChart"] {
+            padding: 0.78rem;
+            border: 1px solid rgba(184, 208, 255, 0.22);
+            border-radius: 18px;
+            background: linear-gradient(
+                145deg,
+                rgba(7, 18, 36, 0.70) 0%,
+                rgba(7, 18, 36, 0.46) 100%
+            );
+            box-shadow: 0 18px 40px rgba(2, 9, 24, 0.36);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+        }
         </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _escape(value: object) -> str:
+    return html.escape(str(value or ""))
+
+
+def _format_int(value: float | int) -> str:
+    return f"{int(round(float(value or 0))):,}".replace(",", ".")
+
+
+def _format_score(value: float | int) -> str:
+    return f"{float(value or 0) * 100:.1f}%".replace(".", ",")
+
+
+def _major_section_header(title: str, subtitle: str) -> None:
+    st.markdown(
+        f"""
+        <div class="mapa-major-section">
+            <div class="mapa-major-section-title">{_escape(title)}</div>
+            <div class="mapa-major-section-subtitle">{_escape(subtitle)}</div>
+        </div>
         """,
         unsafe_allow_html=True,
     )
@@ -128,8 +297,416 @@ def render_sidebar_navigation(current_page: str) -> None:
         st.switch_page(target_page)
 
 
+def _normalize_code(series: pd.Series) -> pd.Series:
+    return series.astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
+
+
+@st.cache_resource(show_spinner=False)
+def _hf_fs(token: str | None) -> HfFileSystem:
+    return HfFileSystem(token=token or None)
+
+
+def _remote_rawpotencial_path(bucket_url: str, filename: str) -> str:
+    if not bucket_url:
+        raise RuntimeError("HF_BUCKET_URL nao foi definido.")
+    return f"{bucket_url.rstrip('/')}/{CANDIDATE_FOLDER}/rawpotencial/{filename}"
+
+
+def _remote_geo_path(bucket_url: str, filename: str) -> str:
+    if not bucket_url:
+        raise RuntimeError("HF_BUCKET_URL nao foi definido.")
+    return f"{bucket_url.rstrip('/')}/geo-mg/{filename}"
+
+
+@st.cache_data(show_spinner="Carregando oportunidades no HF...", ttl=1800)
+def load_opportunity_data(bucket_url: str, token: str | None) -> pd.DataFrame:
+    fs = _hf_fs(token)
+    path = _remote_rawpotencial_path(bucket_url, OPPORTUNITY_PARQUET)
+    with fs.open(path, "rb") as parquet_file:
+        df = pd.read_parquet(parquet_file)
+
+    required = {
+        "cd_setor_censitario",
+        "qt_votos_setor",
+        "perfil_score",
+        "classe_oportunidade_label",
+        "cor_mapa",
+        "cor_mapa_hex",
+    }
+    missing = sorted(required.difference(df.columns))
+    if missing:
+        raise RuntimeError("Colunas ausentes no parquet de oportunidade: " + ", ".join(missing))
+
+    df = df.copy()
+    df["cd_setor_censitario"] = _normalize_code(df["cd_setor_censitario"])
+    for col in [
+        "qt_votos_setor",
+        "votos_score",
+        "perfil_score",
+        "perfil_score_genero",
+        "perfil_score_idade",
+        "perfil_score_escolaridade",
+    ]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    return df
+
+
+@st.cache_data(show_spinner="Baixando malha censitaria do IBGE no HF...", ttl=86400)
+def _ensure_census_gpkg(bucket_url: str, token: str | None) -> str:
+    cache_dir = Path(tempfile.gettempdir()) / "mktpolitica_geo"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    local_path = cache_dir / CENSUS_GPKG_FILENAME
+    if local_path.exists() and local_path.stat().st_size > 100_000_000:
+        return str(local_path)
+
+    fs = _hf_fs(token)
+    fs.get(_remote_geo_path(bucket_url, CENSUS_GPKG_FILENAME), str(local_path))
+    return str(local_path)
+
+
+def _gpkg_wkb_offset(blob: bytes) -> int:
+    if blob[:2] != b"GP":
+        return 0
+    flags = blob[3]
+    envelope_code = (flags >> 1) & 0b111
+    envelope_bytes = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}.get(envelope_code, 0)
+    return 8 + envelope_bytes
+
+
+def _thin_ring(coords: list[list[float]], max_points: int = 72) -> list[list[float]]:
+    if len(coords) <= max_points:
+        return coords
+    step = max(1, int(np.ceil(len(coords) / max_points)))
+    thinned = coords[::step]
+    if thinned[0] != coords[-1]:
+        thinned.append(coords[-1])
+    return thinned
+
+
+def _read_wkb_geometry(blob: bytes, offset: int = 0) -> tuple[dict | None, int]:
+    byte_order = blob[offset]
+    endian = "<" if byte_order == 1 else ">"
+    geom_type = struct.unpack_from(f"{endian}I", blob, offset + 1)[0] % 1000
+    cursor = offset + 5
+
+    if geom_type == 3:
+        rings_count = struct.unpack_from(f"{endian}I", blob, cursor)[0]
+        cursor += 4
+        rings = []
+        for _ in range(rings_count):
+            points_count = struct.unpack_from(f"{endian}I", blob, cursor)[0]
+            cursor += 4
+            coords = []
+            for _ in range(points_count):
+                x, y = struct.unpack_from(f"{endian}dd", blob, cursor)
+                cursor += 16
+                coords.append([x, y])
+            rings.append(_thin_ring(coords))
+        return {"type": "Polygon", "coordinates": rings}, cursor
+
+    if geom_type == 6:
+        polygons_count = struct.unpack_from(f"{endian}I", blob, cursor)[0]
+        cursor += 4
+        polygons = []
+        for _ in range(polygons_count):
+            polygon, cursor = _read_wkb_geometry(blob, cursor)
+            if polygon and polygon["type"] == "Polygon":
+                polygons.append(polygon["coordinates"])
+        return {"type": "MultiPolygon", "coordinates": polygons}, cursor
+
+    return None, len(blob)
+
+
+def _gpkg_geometry_to_geojson(blob: bytes) -> dict | None:
+    offset = _gpkg_wkb_offset(blob)
+    geometry, _cursor = _read_wkb_geometry(blob, offset)
+    return geometry
+
+
+@st.cache_data(show_spinner="Convertendo setores censitarios para o mapa...", ttl=86400)
+def load_census_geojson(bucket_url: str, token: str | None) -> tuple[dict, pd.DataFrame]:
+    gpkg_path = _ensure_census_gpkg(bucket_url, token)
+    con = sqlite3.connect(gpkg_path)
+    rows = con.execute(
+        """
+        SELECT CD_SETOR, CD_MUN, NM_MUN, SITUACAO, geom
+        FROM MG_setores_CD2022
+        """
+    ).fetchall()
+    con.close()
+
+    features = []
+    sectors = []
+    for cd_setor, cd_mun, nm_mun, situacao, geom_blob in rows:
+        geometry = _gpkg_geometry_to_geojson(geom_blob)
+        if geometry is None:
+            continue
+        cd_setor_text = str(cd_setor).strip()
+        features.append(
+            {
+                "type": "Feature",
+                "id": cd_setor_text,
+                "properties": {"CD_SETOR": cd_setor_text},
+                "geometry": geometry,
+            }
+        )
+        sectors.append(
+            {
+                "cd_setor_censitario": cd_setor_text,
+                "cd_municipio_ibge": str(cd_mun).strip(),
+                "municipio_ibge": str(nm_mun).strip(),
+                "situacao_setor_ibge_malha": str(situacao).strip(),
+            }
+        )
+
+    return {"type": "FeatureCollection", "features": features}, pd.DataFrame(sectors)
+
+
+@st.cache_data(show_spinner=False)
+def load_municipal_geojson(geo_dir: str) -> dict:
+    path = Path(geo_dir) / "geojs-31-mun.json"
+    if not path.exists():
+        raise RuntimeError("Arquivo geo-mg/geojs-31-mun.json nao encontrado.")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _municipal_boundary_trace(municipal_geojson: dict) -> go.Scattergeo:
+    lons: list[float | None] = []
+    lats: list[float | None] = []
+
+    for feature in municipal_geojson.get("features", []):
+        geometry = feature.get("geometry") or {}
+        geometry_type = geometry.get("type")
+        coordinates = geometry.get("coordinates") or []
+        polygons = coordinates if geometry_type == "MultiPolygon" else [coordinates]
+        for polygon in polygons:
+            if not polygon:
+                continue
+            exterior = polygon[0]
+            for lon, lat in exterior:
+                lons.append(lon)
+                lats.append(lat)
+            lons.append(None)
+            lats.append(None)
+
+    return go.Scattergeo(
+        lon=lons,
+        lat=lats,
+        mode="lines",
+        line={"width": 0.8, "color": "rgba(248, 251, 255, 0.70)"},
+        hoverinfo="skip",
+        showlegend=False,
+        name="Limite municipal",
+    )
+
+
+def build_opportunity_map(
+    sectors_df: pd.DataFrame,
+    census_geojson: dict,
+    opportunity_df: pd.DataFrame,
+    municipal_geojson: dict,
+):
+    sectors = sectors_df.copy()
+    sectors["cd_setor_censitario"] = _normalize_code(sectors["cd_setor_censitario"])
+    opportunity = opportunity_df.copy()
+    opportunity["cd_setor_censitario"] = _normalize_code(opportunity["cd_setor_censitario"])
+
+    keep_cols = [
+        "cd_setor_censitario",
+        "nm_municipio",
+        "nm_bairro_principal",
+        "bairros_no_setor",
+        "qt_votos_setor",
+        "votos_score",
+        "perfil_score",
+        "perfil_score_genero",
+        "perfil_score_idade",
+        "perfil_score_escolaridade",
+        "concentracao_votos",
+        "classe_oportunidade_label",
+        "cor_mapa",
+        "cor_mapa_hex",
+        "perfil_eleitor_dominante",
+        "titulo_perfil_dominante",
+    ]
+    keep_cols = [col for col in keep_cols if col in opportunity.columns]
+
+    mapa_df = sectors.merge(opportunity[keep_cols], on="cd_setor_censitario", how="left")
+    mapa_df["classe_oportunidade_label"] = mapa_df["classe_oportunidade_label"].fillna(
+        "Fora do perfil do Bruno"
+    )
+    mapa_df["cor_mapa"] = mapa_df["cor_mapa"].fillna("branco")
+    mapa_df["cor_mapa_hex"] = mapa_df["cor_mapa_hex"].fillna("#FFFFFF")
+    mapa_df["nm_municipio_exibicao"] = (
+        mapa_df["nm_municipio"].fillna(mapa_df["municipio_ibge"]).fillna("Municipio")
+    )
+    mapa_df["nm_bairro_principal"] = mapa_df["nm_bairro_principal"].fillna("Fora da base")
+    mapa_df["bairros_no_setor"] = mapa_df["bairros_no_setor"].fillna("Fora da base")
+    mapa_df["concentracao_votos"] = mapa_df["concentracao_votos"].fillna("sem votos")
+    mapa_df["titulo_perfil_dominante"] = mapa_df["titulo_perfil_dominante"].fillna("N/D")
+    mapa_df["perfil_eleitor_dominante"] = mapa_df["perfil_eleitor_dominante"].fillna(0)
+    for col in [
+        "qt_votos_setor",
+        "votos_score",
+        "perfil_score",
+        "perfil_score_genero",
+        "perfil_score_idade",
+        "perfil_score_escolaridade",
+    ]:
+        if col not in mapa_df.columns:
+            mapa_df[col] = 0.0
+        mapa_df[col] = pd.to_numeric(mapa_df[col], errors="coerce").fillna(0.0)
+
+    fig = px.choropleth(
+        mapa_df,
+        geojson=census_geojson,
+        locations="cd_setor_censitario",
+        featureidkey="properties.CD_SETOR",
+        color="classe_oportunidade_label",
+        color_discrete_map=CLASS_COLORS,
+        category_orders={"classe_oportunidade_label": CLASS_ORDER},
+        hover_name="nm_municipio_exibicao",
+        custom_data=[
+            "cd_setor_censitario",
+            "nm_bairro_principal",
+            "bairros_no_setor",
+            "qt_votos_setor",
+            "perfil_score",
+            "perfil_score_genero",
+            "perfil_score_idade",
+            "perfil_score_escolaridade",
+            "concentracao_votos",
+            "titulo_perfil_dominante",
+            "classe_oportunidade_label",
+        ],
+        title="Oportunidade eleitoral por setor censitario",
+        template="plotly_white",
+    )
+    fig.update_traces(
+        marker_line_color="rgba(210,228,255,0.22)",
+        marker_line_width=0.12,
+        hovertemplate=(
+            "<b>%{hovertext}</b><br>"
+            "<span style='color:#93c5fd'>Setor:</span> %{customdata[0]}<br>"
+            "<span style='color:#93c5fd'>Bairro principal:</span> %{customdata[1]}<br>"
+            "<span style='color:#93c5fd'>Bairros no setor:</span> %{customdata[2]}<br>"
+            "<span style='color:#93c5fd'>Votos no setor:</span> %{customdata[3]:,.0f}<br>"
+            "<span style='color:#93c5fd'>Similaridade:</span> %{customdata[4]:.1%}<br>"
+            "<span style='color:#93c5fd'>Genero:</span> %{customdata[5]:.1%} | "
+            "<span style='color:#93c5fd'>Idade:</span> %{customdata[6]:.1%} | "
+            "<span style='color:#93c5fd'>Escolaridade:</span> %{customdata[7]:.1%}<br>"
+            "<span style='color:#93c5fd'>Concentracao:</span> %{customdata[8]}<br>"
+            "<span style='color:#93c5fd'>Perfil dominante:</span> %{customdata[9]}<br>"
+            "<span style='color:#93c5fd'>Classe:</span> %{customdata[10]}<extra></extra>"
+        ),
+        hoverlabel={
+            "bgcolor": "rgba(5,12,28,0.95)",
+            "font_color": "#EAF2FF",
+            "font_size": 12,
+            "bordercolor": "rgba(147,197,253,0.55)",
+        },
+    )
+    fig.add_trace(_municipal_boundary_trace(municipal_geojson))
+    fig.update_geos(fitbounds="locations", visible=False, bgcolor="rgba(0,0,0,0)")
+    fig.update_layout(
+        height=720,
+        margin={"l": 6, "r": 10, "t": 58, "b": 6},
+        paper_bgcolor="rgba(255,255,255,0.0)",
+        plot_bgcolor="rgba(255,255,255,0.0)",
+        font={"color": "#eaf2ff", "family": "Segoe UI, Inter, sans-serif"},
+        title={"font": {"size": 20, "color": "#eaf2ff"}},
+        legend={
+            "title": {"text": "Territorios"},
+            "font": {"color": "#eaf2ff", "size": 12},
+            "bgcolor": "rgba(5,12,28,0.64)",
+            "bordercolor": "rgba(184,208,255,0.20)",
+            "borderwidth": 1,
+        },
+    )
+    return fig, mapa_df
+
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 apply_background()
 _apply_page_visual_refinement()
 render_sidebar_navigation("pages/potencial26.py")
 
 st.title("Potencial de Votos para 2026")
+st.caption("Mapa censitario completo com oportunidades eleitorais por setor.")
+
+bucket_url = os.getenv("HF_BUCKET_URL", "").strip()
+hf_token = os.getenv("HF_TOKEN", "").strip() or None
+
+_major_section_header(
+    "Mapa de oportunidade por setor censitario",
+    "A malha censitaria completa de Minas Gerais aparece no mapa. Setores fora do perfil do Bruno ficam em branco; setores classificados usam as cores de oportunidade.",
+)
+
+try:
+    opportunity_df = load_opportunity_data(bucket_url, hf_token)
+    census_geojson, sectors_df = load_census_geojson(bucket_url, hf_token)
+    municipal_geojson = load_municipal_geojson(str(Path(__file__).resolve().parents[1] / "geo-mg"))
+except Exception as exc:
+    st.warning(f"Nao foi possivel carregar o mapa de oportunidade. Detalhe: {exc}")
+    st.stop()
+
+fig_opportunity, mapa_df = build_opportunity_map(
+    sectors_df,
+    census_geojson,
+    opportunity_df,
+    municipal_geojson,
+)
+
+classified_sectors = int(opportunity_df["cd_setor_censitario"].nunique())
+total_sectors = int(sectors_df["cd_setor_censitario"].nunique())
+total_votes = float(opportunity_df["qt_votos_setor"].sum())
+avg_similarity = float(opportunity_df["perfil_score"].mean()) if not opportunity_df.empty else 0.0
+
+col_kpi_1, col_kpi_2, col_kpi_3, col_kpi_4 = st.columns(4, gap="large")
+with col_kpi_1:
+    st.markdown(
+        f"""
+        <div class="mapa-kpi-card">
+            <div class="mapa-kpi-label">Setores na malha IBGE</div>
+            <div class="mapa-kpi-value">{_format_int(total_sectors)}</div>
+            <div class="mapa-kpi-caption">Cobertura territorial completa de MG</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with col_kpi_2:
+    st.markdown(
+        f"""
+        <div class="mapa-kpi-card">
+            <div class="mapa-kpi-label">Setores classificados</div>
+            <div class="mapa-kpi-value">{_format_int(classified_sectors)}</div>
+            <div class="mapa-kpi-caption">Territorios conectados ao perfil de voto</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with col_kpi_3:
+    st.markdown(
+        f"""
+        <div class="mapa-kpi-card">
+            <div class="mapa-kpi-label">Votos analisados</div>
+            <div class="mapa-kpi-value">{_format_int(total_votes)}</div>
+            <div class="mapa-kpi-caption">Total usado na matriz de oportunidade</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with col_kpi_4:
+    st.markdown(
+        f"""
+        <div class="mapa-kpi-card">
+            <div class="mapa-kpi-label">Similaridade media</div>
+            <div class="mapa-kpi-value">{_format_score(avg_similarity)}</div>
+            <div class="mapa-kpi-caption">Genero, idade e escolaridade combinados</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+st.plotly_chart(fig_opportunity, width="stretch")
