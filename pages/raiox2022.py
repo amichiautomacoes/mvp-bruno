@@ -24,6 +24,10 @@ CANDIDATE_FULL_NAME = "BRUNO ARAUJO OLIVEIRA"
 CANDIDATE_OFFICE = "DEPUTADO ESTADUAL"
 CANDIDATE_PARTY = "NOVO"
 CANDIDATE_FOLDER = "bruno-raiox22"
+NAVIGATION_PAGES = {
+    "Pagina 1 - RaioX Votacao 2022": "pages/raiox2022.py",
+    "Pagina 2 - Potencial de Votos 2026": "pages/potencial26.py",
+}
 GEO_PARQUET = (
     "2022_deputado_estadual_MG_130001598582_bruno_araujo_geografico.parquet"
 )
@@ -610,6 +614,22 @@ def _format_percent(value: float | int) -> str:
 
 def _escape(value: object) -> str:
     return html.escape(str(value or ""))
+
+
+def render_sidebar_navigation(current_page: str) -> None:
+    labels = list(NAVIGATION_PAGES.keys())
+    current_label = next(
+        label for label, page_path in NAVIGATION_PAGES.items() if page_path == current_page
+    )
+    selected_label = st.sidebar.selectbox(
+        "Selecionar pagina",
+        labels,
+        index=labels.index(current_label),
+        key=f"sidebar_navigation_{current_page}",
+    )
+    target_page = NAVIGATION_PAGES[selected_label]
+    if target_page != current_page:
+        st.switch_page(target_page)
 
 
 def _build_log_colorbar_ticks(max_votes: float) -> tuple[list[float], list[str]]:
@@ -1733,6 +1753,7 @@ def build_horizontal_bar_chart(distribution: pd.DataFrame, profile: str, scope: 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 apply_background()
 _apply_page_visual_refinement()
+render_sidebar_navigation("pages/raiox2022.py")
 
 st.title("RaioX Votacao 2022")
 st.caption("Analises descritivas geograficas e do perfil do eleitor na ultima eleicao.")

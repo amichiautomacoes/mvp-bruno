@@ -19,6 +19,10 @@ from huggingface_hub import HfFileSystem
 st.set_page_config(page_title="Potencial de Votos para 2026", layout="wide")
 
 CANDIDATE_FOLDER = "bruno-raiox22"
+NAVIGATION_PAGES = {
+    "Pagina 1 - RaioX Votacao 2022": "pages/raiox2022.py",
+    "Pagina 2 - Potencial de Votos 2026": "pages/potencial26.py",
+}
 CENSUS_GPKG_FILENAME = "MG_setores_CD2022.gpkg"
 RAWIBGE_FILES = {
     "Idade": "df_idade_mg.parquet",
@@ -294,6 +298,22 @@ def _major_section_header(title: str, subtitle: str) -> None:
 
 def _escape(value: object) -> str:
     return html.escape(str(value or ""))
+
+
+def render_sidebar_navigation(current_page: str) -> None:
+    labels = list(NAVIGATION_PAGES.keys())
+    current_label = next(
+        label for label, page_path in NAVIGATION_PAGES.items() if page_path == current_page
+    )
+    selected_label = st.sidebar.selectbox(
+        "Selecionar pagina",
+        labels,
+        index=labels.index(current_label),
+        key=f"sidebar_navigation_{current_page}",
+    )
+    target_page = NAVIGATION_PAGES[selected_label]
+    if target_page != current_page:
+        st.switch_page(target_page)
 
 
 def _format_int(value: float | int) -> str:
@@ -578,6 +598,7 @@ def build_census_map(
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 apply_background()
 _apply_page_visual_refinement()
+render_sidebar_navigation("pages/potencial26.py")
 
 st.title("Potencial de Votos para 2026")
 st.caption("Analises de potencial eleitoral para a proxima eleicao.")
