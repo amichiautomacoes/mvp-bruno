@@ -44,17 +44,13 @@ CLASS_COLORS = {
     "Fora do perfil do Bruno": "#FFFFFF",
 }
 MUNICIPAL_BLUE_SCALE = [
-    "#FFFFFF",
-    "#E9F2F9",
-    "#D4E6F4",
-    "#BEDAEF",
-    "#A9CEEA",
-    "#94C2E5",
-    "#7EB6E0",
-    "#69AADB",
-    "#539ED6",
-    "#3E92D1",
     "#2986CC",
+    "#2478B7",
+    "#206BA3",
+    "#1C5D8E",
+    "#18507A",
+    "#144366",
+    "#103551",
 ]
 RED_OPPORTUNITY_LABEL = "Sem concentracao de votos e perfil diferente"
 SQLITE_IN_CHUNK_SIZE = 900
