@@ -37,13 +37,31 @@ CLASS_ORDER = [
     "Fora do perfil do Bruno",
 ]
 CLASS_COLORS = {
-    "Alta concentracao de votos e perfil parecido": "#2563EB",
+    "Alta concentracao de votos e perfil parecido": "#38761D",
     "Concentracao media de votos e perfil parecido": "#FACC15",
-    "Pouco voto, mas perfil parecido": "#22C55E",
+    "Pouco voto, mas perfil parecido": "#8FCE00",
     "Sem concentracao de votos e perfil diferente": "#EF4444",
     "Fora do perfil do Bruno": "#FFFFFF",
 }
+MUNICIPAL_BLUE_SCALE = [
+    "#FFFFFF",
+    "#E9F2F9",
+    "#D4E6F4",
+    "#BEDAEF",
+    "#A9CEEA",
+    "#94C2E5",
+    "#7EB6E0",
+    "#69AADB",
+    "#539ED6",
+    "#3E92D1",
+    "#2986CC",
+]
+RED_OPPORTUNITY_LABEL = "Sem concentracao de votos e perfil diferente"
 SQLITE_IN_CHUNK_SIZE = 900
+GEOGRAPHY_OPTIONS = {
+    "Bairro aproximado": "bairro",
+    "Setor censitario": "setor",
+}
 
 
 def _mime_type(path: Path) -> str:
@@ -270,6 +288,15 @@ def _format_score(value: float | int) -> str:
     return f"{float(value or 0) * 100:.1f}%".replace(".", ",")
 
 
+def _safe_weighted_average(values: pd.Series, weights: pd.Series) -> float:
+    numeric_values = pd.to_numeric(values, errors="coerce").fillna(0.0)
+    numeric_weights = pd.to_numeric(weights, errors="coerce").fillna(0.0)
+    denominator = float(numeric_weights.sum())
+    if denominator > 0:
+        return float((numeric_values * numeric_weights).sum() / denominator)
+    return float(numeric_values.mean()) if numeric_values.notna().any() else 0.0
+
+
 def _major_section_header(title: str, subtitle: str) -> None:
     st.markdown(
         f"""
@@ -431,6 +458,92 @@ def _gpkg_geometry_to_geojson(blob: bytes) -> dict | None:
     return geometry
 
 
+def _geometry_as_multipolygon(geometry: dict) -> list:
+    if geometry.get("type") == "Polygon":
+        return [geometry.get("coordinates", [])]
+    if geometry.get("type") == "MultiPolygon":
+        return geometry.get("coordinates", [])
+    return []
+
+
+def _aggregate_to_neighborhoods(
+    mapa_df: pd.DataFrame,
+    census_geojson: dict,
+) -> tuple[dict, pd.DataFrame]:
+    df = mapa_df.copy()
+    df["nm_bairro_principal"] = df["nm_bairro_principal"].fillna("Fora da base")
+    df["nm_municipio_exibicao"] = df["nm_municipio_exibicao"].fillna("Municipio")
+    df["bairro_map_id"] = (
+        df["cd_municipio_ibge"].astype(str).str.strip()
+        + "::"
+        + df["nm_bairro_principal"].astype(str).str.strip().str.upper()
+    )
+
+    geometry_by_sector = {
+        str(feature.get("properties", {}).get("CD_SETOR", "")).strip(): feature.get("geometry")
+        for feature in census_geojson.get("features", [])
+    }
+    polygons_by_bairro: dict[str, list] = {}
+    for row in df[["bairro_map_id", "cd_setor_censitario"]].itertuples(index=False):
+        geometry = geometry_by_sector.get(str(row.cd_setor_censitario).strip())
+        if geometry:
+            polygons_by_bairro.setdefault(row.bairro_map_id, []).extend(
+                _geometry_as_multipolygon(geometry)
+            )
+
+    group_cols = [
+        "bairro_map_id",
+        "cd_municipio_ibge",
+        "nm_municipio_exibicao",
+        "nm_bairro_principal",
+    ]
+    score_cols = [
+        "perfil_score",
+        "perfil_score_genero",
+        "perfil_score_idade",
+        "perfil_score_escolaridade",
+        "votos_score",
+    ]
+    rows = []
+    for keys, group in df.groupby(group_cols, dropna=False):
+        row = dict(zip(group_cols, keys))
+        row["qt_votos_setor"] = float(group["qt_votos_setor"].sum())
+        row["setores_no_bairro"] = int(group["cd_setor_censitario"].nunique())
+        row["cd_setores_exemplo"] = ", ".join(
+            group["cd_setor_censitario"].astype(str).sort_values().head(6).tolist()
+        )
+        for col in score_cols:
+            row[col] = _safe_weighted_average(group[col], group["qt_votos_setor"])
+        row["concentracao_votos"] = (
+            group.sort_values("qt_votos_setor", ascending=False)["concentracao_votos"].iloc[0]
+        )
+        row["titulo_perfil_dominante"] = (
+            group.sort_values("qt_votos_setor", ascending=False)["titulo_perfil_dominante"].iloc[0]
+        )
+        class_votes = group.groupby("classe_oportunidade_label", dropna=False)[
+            "qt_votos_setor"
+        ].sum()
+        row["classe_oportunidade_label"] = str(class_votes.idxmax())
+        row["cor_mapa_hex"] = CLASS_COLORS.get(row["classe_oportunidade_label"], "#FFFFFF")
+        rows.append(row)
+
+    bairros_df = pd.DataFrame(rows)
+    features = []
+    for bairro_id, polygons in polygons_by_bairro.items():
+        if not polygons:
+            continue
+        features.append(
+            {
+                "type": "Feature",
+                "id": bairro_id,
+                "properties": {"BAIRRO_ID": bairro_id},
+                "geometry": {"type": "MultiPolygon", "coordinates": polygons},
+            }
+        )
+
+    return {"type": "FeatureCollection", "features": features}, bairros_df
+
+
 @st.cache_data(show_spinner=False, ttl=86400)
 def load_census_sector_count(bucket_url: str, token: str | None) -> int:
     gpkg_path = _ensure_census_gpkg(bucket_url, token)
@@ -510,29 +623,66 @@ def load_municipal_geojson(geo_dir: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _municipal_fill_trace(municipal_geojson: dict) -> go.Choropleth:
+def _municipal_score_by_sector(mapa_df: pd.DataFrame) -> dict[str, float]:
+    if mapa_df.empty:
+        return {}
+
+    scored = mapa_df.copy()
+    scored["cd_municipio_ibge"] = scored["cd_municipio_ibge"].astype(str).str.strip().str.zfill(7)
+    scored["is_red_sector"] = scored["classe_oportunidade_label"].eq(RED_OPPORTUNITY_LABEL)
+    by_city = scored.groupby("cd_municipio_ibge", dropna=False).agg(
+        setores_classificados=("cd_setor_censitario", "nunique"),
+        setores_vermelhos=("is_red_sector", "sum"),
+    )
+    by_city["score_municipal"] = (
+        by_city["setores_classificados"] - (by_city["setores_vermelhos"] * 2)
+    ).clip(lower=0)
+    max_score = float(by_city["score_municipal"].max())
+    if max_score <= 0:
+        by_city["score_normalizado"] = 0.0
+    else:
+        by_city["score_normalizado"] = by_city["score_municipal"] / max_score
+    return by_city["score_normalizado"].to_dict()
+
+
+def _municipal_colorscale() -> list[list[object]]:
+    max_index = len(MUNICIPAL_BLUE_SCALE) - 1
+    return [[index / max_index, color] for index, color in enumerate(MUNICIPAL_BLUE_SCALE)]
+
+
+def _municipal_fill_trace(municipal_geojson: dict, mapa_df: pd.DataFrame) -> go.Choropleth:
+    municipal_scores = _municipal_score_by_sector(mapa_df)
     locations = []
     names = []
+    scores = []
     for feature in municipal_geojson.get("features", []):
         properties = feature.get("properties") or {}
         geo_id = str(properties.get("id", "")).strip()
         if geo_id:
-            locations.append(geo_id.zfill(7))
+            location = geo_id.zfill(7)
+            locations.append(location)
             names.append(
                 str(properties.get("name") or properties.get("description") or "Municipio")
             )
+            scores.append(float(municipal_scores.get(location, 0.0)))
 
     return go.Choropleth(
         geojson=municipal_geojson,
         locations=locations,
-        z=[0] * len(locations),
+        z=scores,
         text=names,
         featureidkey="properties.id",
-        colorscale=[[0, "rgba(255,255,255,0.92)"], [1, "rgba(255,255,255,0.92)"]],
+        zmin=0,
+        zmax=1,
+        colorscale=_municipal_colorscale(),
         marker_line_color="rgba(15, 23, 42, 0.38)",
         marker_line_width=0.45,
         showscale=False,
-        hovertemplate="<b>%{text}</b><extra></extra>",
+        hovertemplate=(
+            "<b>%{text}</b><br>"
+            "<span style='color:#93c5fd'>Intensidade territorial:</span> %{z:.0%}"
+            "<extra></extra>"
+        ),
         hoverlabel={
             "bgcolor": "rgba(5,12,28,0.95)",
             "font_color": "#EAF2FF",
@@ -549,6 +699,7 @@ def build_opportunity_map(
     census_geojson: dict,
     opportunity_df: pd.DataFrame,
     municipal_geojson: dict,
+    geography: str,
 ):
     sectors = sectors_df.copy()
     sectors["cd_setor_censitario"] = _normalize_code(sectors["cd_setor_censitario"])
@@ -601,16 +752,47 @@ def build_opportunity_map(
             mapa_df[col] = 0.0
         mapa_df[col] = pd.to_numeric(mapa_df[col], errors="coerce").fillna(0.0)
 
-    fig = px.choropleth(
-        mapa_df,
-        geojson=census_geojson,
-        locations="cd_setor_censitario",
-        featureidkey="properties.CD_SETOR",
-        color="classe_oportunidade_label",
-        color_discrete_map=CLASS_COLORS,
-        category_orders={"classe_oportunidade_label": CLASS_ORDER},
-        hover_name="nm_municipio_exibicao",
-        custom_data=[
+    if geography == "bairro":
+        plot_geojson, plot_df = _aggregate_to_neighborhoods(mapa_df, census_geojson)
+        locations_col = "bairro_map_id"
+        feature_id_key = "properties.BAIRRO_ID"
+        hover_name = "nm_bairro_principal"
+        custom_data = [
+            "nm_municipio_exibicao",
+            "setores_no_bairro",
+            "cd_setores_exemplo",
+            "qt_votos_setor",
+            "perfil_score",
+            "perfil_score_genero",
+            "perfil_score_idade",
+            "perfil_score_escolaridade",
+            "concentracao_votos",
+            "titulo_perfil_dominante",
+            "classe_oportunidade_label",
+        ]
+        title = "Oportunidade eleitoral por bairro aproximado"
+        hovertemplate = (
+            "<b>%{hovertext}</b><br>"
+            "<span style='color:#93c5fd'>Municipio:</span> %{customdata[0]}<br>"
+            "<span style='color:#93c5fd'>Setores agrupados:</span> %{customdata[1]}<br>"
+            "<span style='color:#93c5fd'>Exemplos de setores:</span> %{customdata[2]}<br>"
+            "<span style='color:#93c5fd'>Votos no bairro:</span> %{customdata[3]:,.0f}<br>"
+            "<span style='color:#93c5fd'>Similaridade:</span> %{customdata[4]:.1%}<br>"
+            "<span style='color:#93c5fd'>Genero:</span> %{customdata[5]:.1%} | "
+            "<span style='color:#93c5fd'>Idade:</span> %{customdata[6]:.1%} | "
+            "<span style='color:#93c5fd'>Escolaridade:</span> %{customdata[7]:.1%}<br>"
+            "<span style='color:#93c5fd'>Concentracao:</span> %{customdata[8]}<br>"
+            "<span style='color:#93c5fd'>Perfil dominante:</span> %{customdata[9]}<br>"
+            "<span style='color:#93c5fd'>Classe:</span> %{customdata[10]}<extra></extra>"
+        )
+        marker_line_width = 0.42
+    else:
+        plot_geojson = census_geojson
+        plot_df = mapa_df
+        locations_col = "cd_setor_censitario"
+        feature_id_key = "properties.CD_SETOR"
+        hover_name = "nm_municipio_exibicao"
+        custom_data = [
             "cd_setor_censitario",
             "nm_bairro_principal",
             "bairros_no_setor",
@@ -622,14 +804,9 @@ def build_opportunity_map(
             "concentracao_votos",
             "titulo_perfil_dominante",
             "classe_oportunidade_label",
-        ],
-        title="Oportunidade eleitoral por setor censitario",
-        template="plotly_white",
-    )
-    fig.update_traces(
-        marker_line_color="rgba(210,228,255,0.22)",
-        marker_line_width=0.12,
-        hovertemplate=(
+        ]
+        title = "Oportunidade eleitoral por setor censitario"
+        hovertemplate = (
             "<b>%{hovertext}</b><br>"
             "<span style='color:#93c5fd'>Setor:</span> %{customdata[0]}<br>"
             "<span style='color:#93c5fd'>Bairro principal:</span> %{customdata[1]}<br>"
@@ -642,7 +819,26 @@ def build_opportunity_map(
             "<span style='color:#93c5fd'>Concentracao:</span> %{customdata[8]}<br>"
             "<span style='color:#93c5fd'>Perfil dominante:</span> %{customdata[9]}<br>"
             "<span style='color:#93c5fd'>Classe:</span> %{customdata[10]}<extra></extra>"
-        ),
+        )
+        marker_line_width = 0.12
+
+    fig = px.choropleth(
+        plot_df,
+        geojson=plot_geojson,
+        locations=locations_col,
+        featureidkey=feature_id_key,
+        color="classe_oportunidade_label",
+        color_discrete_map=CLASS_COLORS,
+        category_orders={"classe_oportunidade_label": CLASS_ORDER},
+        hover_name=hover_name,
+        custom_data=custom_data,
+        title=title,
+        template="plotly_white",
+    )
+    fig.update_traces(
+        marker_line_color="rgba(210,228,255,0.22)",
+        marker_line_width=marker_line_width,
+        hovertemplate=hovertemplate,
         hoverlabel={
             "bgcolor": "rgba(5,12,28,0.95)",
             "font_color": "#EAF2FF",
@@ -650,7 +846,7 @@ def build_opportunity_map(
             "bordercolor": "rgba(147,197,253,0.55)",
         },
     )
-    fig.add_trace(_municipal_fill_trace(municipal_geojson))
+    fig.add_trace(_municipal_fill_trace(municipal_geojson, mapa_df))
     fig.data = (fig.data[-1],) + fig.data[:-1]
     fig.update_geos(fitbounds="locations", visible=False, bgcolor="rgba(0,0,0,0)")
     fig.update_layout(
@@ -668,7 +864,7 @@ def build_opportunity_map(
             "borderwidth": 1,
         },
     )
-    return fig, mapa_df
+    return fig, mapa_df, plot_df
 
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
@@ -677,15 +873,22 @@ _apply_page_visual_refinement()
 render_sidebar_navigation("pages/potencial26.py")
 
 st.title("Potencial de Votos para 2026")
-st.caption("Mapa censitario completo com oportunidades eleitorais por setor.")
+st.caption("Mapa de oportunidades eleitorais com visualizacao por bairro aproximado ou setor.")
 
 bucket_url = os.getenv("HF_BUCKET_URL", "").strip()
 hf_token = os.getenv("HF_TOKEN", "").strip() or None
 
 _major_section_header(
-    "Mapa de oportunidade por setor censitario",
-    "O mapa renderiza os setores classificados na matriz de oportunidade, com limites municipais como contexto territorial.",
+    "Mapa de oportunidade territorial",
+    "A visualizacao por bairro agrupa setores censitarios pelo bairro principal da base. A visao por setor continua disponivel para detalhe fino.",
 )
+
+geography_label = st.segmented_control(
+    "Granularidade do mapa",
+    options=list(GEOGRAPHY_OPTIONS.keys()),
+    default="Bairro aproximado",
+)
+geography = GEOGRAPHY_OPTIONS[geography_label or "Bairro aproximado"]
 
 try:
     opportunity_df = load_opportunity_data(bucket_url, hf_token)
@@ -703,17 +906,24 @@ except Exception as exc:
     st.warning(f"Nao foi possivel carregar o mapa de oportunidade. Detalhe: {exc}")
     st.stop()
 
-fig_opportunity, mapa_df = build_opportunity_map(
+fig_opportunity, mapa_df, plot_df = build_opportunity_map(
     sectors_df,
     census_geojson,
     opportunity_df,
     municipal_geojson,
+    geography,
 )
 
-classified_sectors = int(opportunity_df["cd_setor_censitario"].nunique())
+classified_territories = int(len(plot_df))
 total_sectors = int(total_census_sectors)
 total_votes = float(opportunity_df["qt_votos_setor"].sum())
 avg_similarity = float(opportunity_df["perfil_score"].mean()) if not opportunity_df.empty else 0.0
+territory_label = "Bairros no mapa" if geography == "bairro" else "Setores classificados"
+territory_caption = (
+    "Agrupados pelo bairro principal dos setores"
+    if geography == "bairro"
+    else "Territorios conectados ao perfil de voto"
+)
 
 col_kpi_1, col_kpi_2, col_kpi_3, col_kpi_4 = st.columns(4, gap="large")
 with col_kpi_1:
@@ -731,9 +941,9 @@ with col_kpi_2:
     st.markdown(
         f"""
         <div class="mapa-kpi-card">
-            <div class="mapa-kpi-label">Setores classificados</div>
-            <div class="mapa-kpi-value">{_format_int(classified_sectors)}</div>
-            <div class="mapa-kpi-caption">Territorios conectados ao perfil de voto</div>
+            <div class="mapa-kpi-label">{_escape(territory_label)}</div>
+            <div class="mapa-kpi-value">{_format_int(classified_territories)}</div>
+            <div class="mapa-kpi-caption">{_escape(territory_caption)}</div>
         </div>
         """,
         unsafe_allow_html=True,
