@@ -43,6 +43,7 @@ CLASS_COLORS = {
     "Sem concentracao de votos e perfil diferente": "#EF4444",
     "Fora do perfil do Bruno": "#FFFFFF",
 }
+SQLITE_IN_CHUNK_SIZE = 900
 
 
 def _mime_type(path: Path) -> str:
@@ -365,6 +366,12 @@ def _ensure_census_gpkg(bucket_url: str, token: str | None) -> str:
     return str(local_path)
 
 
+def _sector_ids_for_query(sector_ids: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        sorted({str(sector_id).strip() for sector_id in sector_ids if str(sector_id).strip()})
+    )
+
+
 def _gpkg_wkb_offset(blob: bytes) -> int:
     if blob[:2] != b"GP":
         return 0
@@ -424,16 +431,48 @@ def _gpkg_geometry_to_geojson(blob: bytes) -> dict | None:
     return geometry
 
 
-@st.cache_data(show_spinner="Convertendo setores censitarios para o mapa...", ttl=86400)
-def load_census_geojson(bucket_url: str, token: str | None) -> tuple[dict, pd.DataFrame]:
+@st.cache_data(show_spinner=False, ttl=86400)
+def load_census_sector_count(bucket_url: str, token: str | None) -> int:
     gpkg_path = _ensure_census_gpkg(bucket_url, token)
     con = sqlite3.connect(gpkg_path)
-    rows = con.execute(
-        """
-        SELECT CD_SETOR, CD_MUN, NM_MUN, SITUACAO, geom
-        FROM MG_setores_CD2022
-        """
-    ).fetchall()
+    total = int(con.execute("SELECT COUNT(*) FROM MG_setores_CD2022").fetchone()[0])
+    con.close()
+    return total
+
+
+@st.cache_data(show_spinner="Convertendo setores de oportunidade para o mapa...", ttl=86400)
+def load_census_geojson(
+    bucket_url: str,
+    token: str | None,
+    sector_ids: tuple[str, ...],
+) -> tuple[dict, pd.DataFrame]:
+    gpkg_path = _ensure_census_gpkg(bucket_url, token)
+    requested_ids = _sector_ids_for_query(sector_ids)
+    if not requested_ids:
+        return {"type": "FeatureCollection", "features": []}, pd.DataFrame(
+            columns=[
+                "cd_setor_censitario",
+                "cd_municipio_ibge",
+                "municipio_ibge",
+                "situacao_setor_ibge_malha",
+            ]
+        )
+
+    con = sqlite3.connect(gpkg_path)
+    rows = []
+    for start in range(0, len(requested_ids), SQLITE_IN_CHUNK_SIZE):
+        chunk = requested_ids[start : start + SQLITE_IN_CHUNK_SIZE]
+        placeholders = ",".join("?" for _ in chunk)
+        rows.extend(
+            con.execute(
+                f"""
+                SELECT CD_SETOR, CD_MUN, NM_MUN, SITUACAO, geom
+                FROM MG_setores_CD2022
+                WHERE CAST(CD_SETOR AS TEXT) IN ({placeholders})
+                """,
+                chunk,
+            ).fetchall()
+        )
     con.close()
 
     features = []
@@ -640,12 +679,20 @@ hf_token = os.getenv("HF_TOKEN", "").strip() or None
 
 _major_section_header(
     "Mapa de oportunidade por setor censitario",
-    "A malha censitaria completa de Minas Gerais aparece no mapa. Setores fora do perfil do Bruno ficam em branco; setores classificados usam as cores de oportunidade.",
+    "O mapa renderiza os setores classificados na matriz de oportunidade, com limites municipais como contexto territorial.",
 )
 
 try:
     opportunity_df = load_opportunity_data(bucket_url, hf_token)
-    census_geojson, sectors_df = load_census_geojson(bucket_url, hf_token)
+    opportunity_sector_ids = tuple(
+        sorted(opportunity_df["cd_setor_censitario"].dropna().astype(str).str.strip().unique())
+    )
+    total_census_sectors = load_census_sector_count(bucket_url, hf_token)
+    census_geojson, sectors_df = load_census_geojson(
+        bucket_url,
+        hf_token,
+        opportunity_sector_ids,
+    )
     municipal_geojson = load_municipal_geojson(str(Path(__file__).resolve().parents[1] / "geo-mg"))
 except Exception as exc:
     st.warning(f"Nao foi possivel carregar o mapa de oportunidade. Detalhe: {exc}")
@@ -659,7 +706,7 @@ fig_opportunity, mapa_df = build_opportunity_map(
 )
 
 classified_sectors = int(opportunity_df["cd_setor_censitario"].nunique())
-total_sectors = int(sectors_df["cd_setor_censitario"].nunique())
+total_sectors = int(total_census_sectors)
 total_votes = float(opportunity_df["qt_votos_setor"].sum())
 avg_similarity = float(opportunity_df["perfil_score"].mean()) if not opportunity_df.empty else 0.0
 
