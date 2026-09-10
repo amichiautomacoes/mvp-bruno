@@ -60,10 +60,6 @@ NEIGHBORHOOD_BOUNDARY_WIDTH = 0.48
 SECTOR_BOUNDARY_COLOR = "rgba(234, 242, 255, 0.34)"
 SECTOR_BOUNDARY_WIDTH = 0.18
 SQLITE_IN_CHUNK_SIZE = 900
-GEOGRAPHY_OPTIONS = {
-    "Bairro aproximado": "bairro",
-    "Setor censitario": "setor",
-}
 
 
 def _mime_type(path: Path) -> str:
@@ -679,7 +675,6 @@ def _municipal_fill_trace(municipal_geojson: dict, mapa_df: pd.DataFrame) -> go.
         colorscale=_municipal_colorscale(),
         marker_line_color=MUNICIPAL_BOUNDARY_COLOR,
         marker_line_width=MUNICIPAL_BOUNDARY_WIDTH,
-        opacity=0.68,
         showscale=False,
         hovertemplate=(
             "<b>%{text}</b><br>"
@@ -878,7 +873,7 @@ _apply_page_visual_refinement()
 render_sidebar_navigation("pages/potencial26.py")
 
 st.title("Potencial de Votos para 2026")
-st.caption("Mapa de oportunidades eleitorais com visualizacao por bairro aproximado ou setor.")
+st.caption("Mapa de oportunidades eleitorais com visualizacao por bairro aproximado.")
 
 bucket_url = os.getenv("HF_BUCKET_URL", "").strip()
 hf_token = os.getenv("HF_TOKEN", "").strip() or None
@@ -888,12 +883,7 @@ _major_section_header(
     "A visualizacao por bairro agrupa setores censitarios pelo bairro principal da base. A visao por setor continua disponivel para detalhe fino.",
 )
 
-geography_label = st.segmented_control(
-    "Granularidade do mapa",
-    options=list(GEOGRAPHY_OPTIONS.keys()),
-    default="Bairro aproximado",
-)
-geography = GEOGRAPHY_OPTIONS[geography_label or "Bairro aproximado"]
+geography = "bairro"
 
 try:
     opportunity_df = load_opportunity_data(bucket_url, hf_token)
