@@ -53,6 +53,12 @@ MUNICIPAL_BLUE_SCALE = [
     "#103551",
 ]
 RED_OPPORTUNITY_LABEL = "Sem concentracao de votos e perfil diferente"
+MUNICIPAL_BOUNDARY_COLOR = "rgba(5, 12, 28, 0.72)"
+MUNICIPAL_BOUNDARY_WIDTH = 0.9
+NEIGHBORHOOD_BOUNDARY_COLOR = "rgba(234, 242, 255, 0.56)"
+NEIGHBORHOOD_BOUNDARY_WIDTH = 0.48
+SECTOR_BOUNDARY_COLOR = "rgba(234, 242, 255, 0.34)"
+SECTOR_BOUNDARY_WIDTH = 0.18
 SQLITE_IN_CHUNK_SIZE = 900
 GEOGRAPHY_OPTIONS = {
     "Bairro aproximado": "bairro",
@@ -671,8 +677,9 @@ def _municipal_fill_trace(municipal_geojson: dict, mapa_df: pd.DataFrame) -> go.
         zmin=0,
         zmax=1,
         colorscale=_municipal_colorscale(),
-        marker_line_color="rgba(15, 23, 42, 0.38)",
-        marker_line_width=0.45,
+        marker_line_color=MUNICIPAL_BOUNDARY_COLOR,
+        marker_line_width=MUNICIPAL_BOUNDARY_WIDTH,
+        opacity=0.68,
         showscale=False,
         hovertemplate=(
             "<b>%{text}</b><br>"
@@ -781,7 +788,8 @@ def build_opportunity_map(
             "<span style='color:#93c5fd'>Perfil dominante:</span> %{customdata[9]}<br>"
             "<span style='color:#93c5fd'>Classe:</span> %{customdata[10]}<extra></extra>"
         )
-        marker_line_width = 0.42
+        marker_line_width = NEIGHBORHOOD_BOUNDARY_WIDTH
+        marker_line_color = NEIGHBORHOOD_BOUNDARY_COLOR
     else:
         plot_geojson = census_geojson
         plot_df = mapa_df
@@ -816,7 +824,8 @@ def build_opportunity_map(
             "<span style='color:#93c5fd'>Perfil dominante:</span> %{customdata[9]}<br>"
             "<span style='color:#93c5fd'>Classe:</span> %{customdata[10]}<extra></extra>"
         )
-        marker_line_width = 0.12
+        marker_line_width = SECTOR_BOUNDARY_WIDTH
+        marker_line_color = SECTOR_BOUNDARY_COLOR
 
     fig = px.choropleth(
         plot_df,
@@ -832,7 +841,7 @@ def build_opportunity_map(
         template="plotly_white",
     )
     fig.update_traces(
-        marker_line_color="rgba(210,228,255,0.22)",
+        marker_line_color=marker_line_color,
         marker_line_width=marker_line_width,
         hovertemplate=hovertemplate,
         hoverlabel={
