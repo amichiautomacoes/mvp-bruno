@@ -512,21 +512,33 @@ def load_municipal_geojson(geo_dir: str) -> dict:
 
 def _municipal_fill_trace(municipal_geojson: dict) -> go.Choropleth:
     locations = []
+    names = []
     for feature in municipal_geojson.get("features", []):
-        geo_id = str((feature.get("properties") or {}).get("id", "")).strip()
+        properties = feature.get("properties") or {}
+        geo_id = str(properties.get("id", "")).strip()
         if geo_id:
             locations.append(geo_id.zfill(7))
+            names.append(
+                str(properties.get("name") or properties.get("description") or "Municipio")
+            )
 
     return go.Choropleth(
         geojson=municipal_geojson,
         locations=locations,
         z=[0] * len(locations),
+        text=names,
         featureidkey="properties.id",
         colorscale=[[0, "rgba(255,255,255,0.92)"], [1, "rgba(255,255,255,0.92)"]],
         marker_line_color="rgba(15, 23, 42, 0.38)",
         marker_line_width=0.45,
         showscale=False,
-        hoverinfo="skip",
+        hovertemplate="<b>%{text}</b><extra></extra>",
+        hoverlabel={
+            "bgcolor": "rgba(5,12,28,0.95)",
+            "font_color": "#EAF2FF",
+            "font_size": 12,
+            "bordercolor": "rgba(147,197,253,0.55)",
+        },
         showlegend=False,
         name="Municipios",
     )
