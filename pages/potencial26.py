@@ -510,33 +510,26 @@ def load_municipal_geojson(geo_dir: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _municipal_boundary_trace(municipal_geojson: dict) -> go.Scattergeo:
-    lons: list[float | None] = []
-    lats: list[float | None] = []
-
+def _municipal_fill_trace(municipal_geojson: dict) -> go.Choropleth:
+    locations = []
     for feature in municipal_geojson.get("features", []):
-        geometry = feature.get("geometry") or {}
-        geometry_type = geometry.get("type")
-        coordinates = geometry.get("coordinates") or []
-        polygons = coordinates if geometry_type == "MultiPolygon" else [coordinates]
-        for polygon in polygons:
-            if not polygon:
-                continue
-            exterior = polygon[0]
-            for lon, lat in exterior:
-                lons.append(lon)
-                lats.append(lat)
-            lons.append(None)
-            lats.append(None)
+        geo_id = str((feature.get("properties") or {}).get("id", "")).strip()
+        if geo_id:
+            locations.append(geo_id.zfill(7))
 
-    return go.Scattergeo(
-        lon=lons,
-        lat=lats,
-        mode="lines",
-        line={"width": 0.8, "color": "rgba(248, 251, 255, 0.70)"},
+    return go.Choropleth(
+        geojson=municipal_geojson,
+        locations=locations,
+        z=[0] * len(locations),
+        featureidkey="properties.id",
+        colorscale=[[0, "#FFFFFF"], [1, "#FFFFFF"]],
+        marker_line_color="rgba(15, 23, 42, 0.38)",
+        marker_line_width=0.45,
+        opacity=0.92,
+        showscale=False,
         hoverinfo="skip",
         showlegend=False,
-        name="Limite municipal",
+        name="Municipios",
     )
 
 
@@ -646,7 +639,8 @@ def build_opportunity_map(
             "bordercolor": "rgba(147,197,253,0.55)",
         },
     )
-    fig.add_trace(_municipal_boundary_trace(municipal_geojson))
+    fig.add_trace(_municipal_fill_trace(municipal_geojson))
+    fig.data = (fig.data[-1],) + fig.data[:-1]
     fig.update_geos(fitbounds="locations", visible=False, bgcolor="rgba(0,0,0,0)")
     fig.update_layout(
         height=720,
